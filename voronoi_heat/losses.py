@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from .grad_alignment import edge_pair_mirror_scores
+from .grad_alignment import edge_pair_mirror_scores, edge_pair_mirror_scores_from_X
 from .voronoi_heat_torch import (
     face_gradients,
     topk_pairs_per_face,
@@ -301,6 +301,71 @@ def gradient_only_edge_loss(
     e_len = (model.V[vb] - model.V[va]).norm(dim=1)
     len_gate = (e_len / (e_len.mean().detach() + 1.0e-12)).clamp(0.5, 2.0)
     w = conf * len_gate
+    return (w * r).sum() / w.sum().clamp_min(1.0e-9)
+
+
+def gradient_only_edge_loss_x(
+    model: VoronoiHeatModel,
+    X_face: Tensor,
+    *,
+    lam_tau: float = 1.0,
+    lam_u: float = 0.0,
+    beta_edge: float = 12.0,
+) -> Tensor:
+    """Gradient-only residual using unit directions (no labels, no scores).
+
+    Uses hinge-transported unit fields to compute per-edge residual and aggregates
+    with confidence from the X-based mirror scorer. Avoids label-change gating.
+    """
+    device = model.V.device
+    dtype = model.V.dtype
+    edge_idx, edge_tris, pair_ids, scores, conf = edge_pair_mirror_scores_from_X(
+        model.V, model.F, X_face, beta_edge=beta_edge
+    )
+    if edge_tris.numel() == 0 or pair_ids.numel() == 0:
+        return torch.zeros((), device=device, dtype=dtype)
+
+    # Build edge tangent and in-plane normal from geometry
+    va = edge_idx[:, 0]
+    vb = edge_idx[:, 1]
+    tL = edge_tris[:, 0]
+    tR = edge_tris[:, 1]
+    tau = _safe_normalize(model.V[vb] - model.V[va], dim=1)
+    nL = model.n_hat[tL]
+    n_e = _safe_normalize(torch.cross(nL, tau, dim=1), dim=1)
+
+    # Gather unit directions for selected pairs per edge
+    C = X_face.shape[1]
+    P = pair_ids.shape[0]
+    if C == 0 or P == 0:
+        return torch.zeros((), device=device, dtype=dtype)
+
+    # We will pick the best pair per edge as indicated by highest score
+    scores_conf = scores * conf.clamp_min(1.0e-4).unsqueeze(1)
+    best_idx = torch.argmax(scores_conf, dim=1)
+    pair_best = pair_ids[best_idx]
+    i = pair_best[:, 0]
+    j = pair_best[:, 1]
+
+    Xi_L = X_face[tL, i, :]
+    Xj_R = X_face[tR, j, :]
+
+    nXi = (Xi_L * n_e).sum(dim=1)
+    nXj = (Xj_R * n_e).sum(dim=1)
+    tXi = (Xi_L * tau).sum(dim=1)
+    tXj = (Xj_R * tau).sum(dim=1)
+
+    r = (nXi + nXj) ** 2 + float(lam_tau) * (tXi - tXj) ** 2
+    if lam_u > 0.0:
+        # Xi_L and Xj_R are already unit fields
+        r = r + float(lam_u) * (
+            ((Xi_L + Xj_R) * n_e).sum(dim=1) ** 2 + ((Xi_L - Xj_R) * tau).sum(dim=1) ** 2
+        )
+    r = torch.nan_to_num(r, nan=0.0, posinf=1.0e6, neginf=1.0e6)
+
+    e_len = (model.V[vb] - model.V[va]).norm(dim=1)
+    len_gate = (e_len / (e_len.mean().detach() + 1.0e-12)).clamp(0.5, 2.0)
+    w = conf.clamp_min(1.0e-6) * len_gate
     return (w * r).sum() / w.sum().clamp_min(1.0e-9)
 
 

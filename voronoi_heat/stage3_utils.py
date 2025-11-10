@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from .grad_alignment import edge_pair_mirror_scores
+from .grad_alignment import edge_pair_mirror_scores_from_X
 from .voronoi_heat_torch import (
     _smooth_edge_pair_scores,
     _best_pair_per_face_from_edges,
@@ -21,16 +21,16 @@ from .voronoi_heat_torch import (
 
 @torch.no_grad()
 def compute_stage3_face_pairs(
-    model, S: Tensor, *, beta_edge: float
+    model, X_face: Tensor, *, beta_edge: float
 ) -> Tuple[Tensor, Tensor]:
     device = model.V.device
-    dtype = S.dtype
+    dtype = X_face.dtype
     n_faces = model.F.shape[0]
     face_pair = torch.full((n_faces, 2), -1, dtype=torch.long, device=device)
     face_conf = torch.zeros(n_faces, dtype=dtype, device=device)
 
-    edge_idx, edge_tris, pair_ids, scores, conf = edge_pair_mirror_scores(
-        model.V, model.F, S, beta_edge=beta_edge
+    edge_idx, edge_tris, pair_ids, scores, conf = edge_pair_mirror_scores_from_X(
+        model.V, model.F, X_face, beta_edge=beta_edge
     )
     if scores.numel() == 0 or pair_ids.numel() == 0:
         return face_pair, face_conf
@@ -136,4 +136,3 @@ __all__ = [
     "compute_stage3_face_pairs",
     "prepare_stage3_polyline_cache",
 ]
-
