@@ -387,19 +387,39 @@ def train(cfg: TrainConfig) -> None:
                 cert_count = 0
                 if cfg.gradonly_cut_resolve_enable and (cfg.gradonly_cut_every > 0) and ((step % cfg.gradonly_cut_every) == 0) and (seeds is not None) and (len(seeds) >= 2):
                     with torch.no_grad():
-                        if stage3_segments_faces_np is None or stage3_segments_bary_np is None:
-                            (_, _, _, _, seg_faces_np, seg_bary_np) = infer_labels_and_segments(
-                                model,
-                                seeds=None,
-                                B_heat=B_heat.detach(),
-                                cg_tol=cfg.cg_tol,
-                                cg_iters=cfg.cg_iters,
+                        # Propose seams using baseline heat distances (field-independent)
+                        # This avoids self-reference from the current S when proposing segments.
+                        labels_np, dists_np = heat_method_distances(
+                            model, seeds, cg_tol=cfg.cg_tol, cg_iters=cfg.cg_iters
+                        )
+                        S_tensor = torch.from_numpy(dists_np).to(model.V.device, dtype=model.V.dtype)
+                        labels_t = torch.from_numpy(labels_np).to(model.V.device, dtype=torch.long)
+                        s_per_seed = S_tensor.t().contiguous()
+
+                        faces_idx: List[int] = []
+                        bary_list: List[np.ndarray] = []
+                        for f_id in range(model.F.shape[0]):
+                            out = extract_segments_in_face_hard(
+                                model.V,
+                                model.F[f_id],
+                                S_tensor,
+                                labels_t,
+                                face_index=f_id,
+                                faces_all=model.F,
+                                s_per_seed=s_per_seed,
                             )
-                            stage3_segments_faces_np = seg_faces_np
-                            stage3_segments_bary_np = seg_bary_np
-                        else:
-                            seg_faces_np = stage3_segments_faces_np
-                            seg_bary_np = stage3_segments_bary_np
+                            if out is not None:
+                                _, _, b0, b1 = out
+                                faces_idx.append(int(f_id))
+                                bary_list.append(torch.stack([b0, b1], dim=0).cpu().numpy())
+                        seg_faces_np = np.asarray(faces_idx, dtype=np.int64) if faces_idx else np.zeros((0,), dtype=np.int64)
+                        seg_bary_np = (
+                            np.asarray(bary_list, dtype=np.float32)
+                            if bary_list
+                            else np.zeros((0, 2, 3), dtype=np.float32)
+                        )
+                        stage3_segments_faces_np = seg_faces_np
+                        stage3_segments_bary_np = seg_bary_np
 
                     cert_faces_np, cert_bary_np, cert_pairs = certify_segments_equal_distance(
                         model,
