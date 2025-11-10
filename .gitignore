@@ -1,0 +1,12 @@
+# Ignore everything in this repository except the core module
+
+# Ignore all files by default
+/*
+
+# Keep the ignore file itself
+!.gitignore
+
+# Whitelist the voronoi_heat package (and its contents)
+!voronoi_heat/
+!voronoi_heat/**
+
