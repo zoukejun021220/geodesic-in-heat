@@ -78,7 +78,8 @@ _EDGE_CACHE_LIMIT = 16
 def _build_edges_and_adjacency(faces: Tensor) -> Tuple[Tensor, Tensor]:
     """Build undirected edges and adjacency from triangle faces."""
 
-    key = (int(faces.storage().data_ptr()), tuple(faces.shape), faces.device.type)
+    # Use untyped_storage() to avoid TypedStorage deprecation warnings
+    key = (int(faces.untyped_storage().data_ptr()), tuple(faces.shape), faces.device.type)
     cached = _EDGE_CACHE.get(key)
     if cached is not None:
         return cached

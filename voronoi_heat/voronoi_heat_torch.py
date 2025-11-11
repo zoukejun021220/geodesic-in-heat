@@ -143,6 +143,7 @@ def heat_solve_multi(
     iters: int = 500,
     L_csr: Tensor | None = None,
     L_diag: Tensor | None = None,
+    x0: Tensor | None = None,
 ) -> Tensor:
     """Solve (M + t L) U = B for one or more right-hand sides."""
 
@@ -175,7 +176,7 @@ def heat_solve_multi(
         def matvec(X: Tensor) -> Tensor:
             return mass[:, None] * X + t * _safe_sparse_mm(L_local, X)
 
-        return _cg_matrix_multi(matvec, B, A_diag, tol=tol, maxiter=iters)
+        return _cg_matrix_multi(matvec, B, A_diag, tol=tol, maxiter=iters, x0=x0)
 
     # MPS / fallback path using COO SpMV
     diag_mask = row == col
@@ -189,7 +190,7 @@ def heat_solve_multi(
     def matvec(X: Tensor) -> Tensor:
         return mass[:, None] * X + t * spmv_coo_multi(row, col, val.to(B.dtype), X, M_diag.shape[0])
 
-    return _cg_matrix_multi(matvec, B, A_diag, tol=tol, maxiter=iters)
+    return _cg_matrix_multi(matvec, B, A_diag, tol=tol, maxiter=iters, x0=x0)
 
 
 def _cg_matrix_multi(matvec, B: Tensor, A_diag: Tensor, *, tol: float, maxiter: int, x0: Tensor | None = None) -> Tensor:
@@ -1365,6 +1366,7 @@ class VoronoiHeatModel(torch.nn.Module):
                 t=self.t,
                 tol=cg_tol,
                 iters=cg_iters,
+                x0=x0,
             )
         S = scores_from_u(U)
         grad = face_gradients(U, self.F, self.gI, self.gJ, self.gK)
@@ -1470,6 +1472,8 @@ def infer_labels_and_segments(
     enforce_seed_mask: bool = False,
     cg_tol: float = 1.0e-6,
     cg_iters: int = 500,
+    no_label_override: bool = False,
+    return_pairs: bool = False,
 ) -> Tuple[
     np.ndarray,
     List[Tuple[np.ndarray, np.ndarray]],
@@ -1555,10 +1559,11 @@ def infer_labels_and_segments(
     raw_segments: List[Tuple[np.ndarray, np.ndarray]] = []
     faces_idx: List[int] = []
     bary_data: List[np.ndarray] = []
+    pair_data: List[Tuple[int, int]] = []
     s_per_seed = S.t()
 
     # Align face pairs with observed vertex labels to avoid inconsistent bisectors.
-    if face_iter:
+    if face_iter and (not no_label_override):
         face_pair = face_pair.clone()
         F_faces = model.F
         for face_id in face_iter:
@@ -1600,6 +1605,8 @@ def infer_labels_and_segments(
         raw_segments.append((p0.detach().cpu().numpy(), p1.detach().cpu().numpy()))
         faces_idx.append(int(face_id))
         bary_data.append(torch.stack([b0, b1], dim=0).cpu().numpy())
+        if return_pairs:
+            pair_data.append((int(pair[0]), int(pair[1])))
 
     if not raw_segments:
         for f in range(model.F.shape[0]):
@@ -1632,11 +1639,23 @@ def infer_labels_and_segments(
         seg_faces_np = np.zeros((0,), dtype=np.int64)
         seg_bary_np = np.zeros((0, 2, 3), dtype=np.float32)
 
-    return (
-        labels_tensor.cpu().numpy(),
-        polylines,
-        S.detach().cpu().numpy(),
-        U.detach().cpu().numpy(),
-        seg_faces_np,
-        seg_bary_np,
-    )
+    if return_pairs and faces_idx:
+        seg_pairs_np = np.asarray(pair_data, dtype=np.int64)
+        return (
+            labels_tensor.cpu().numpy(),
+            polylines,
+            S.detach().cpu().numpy(),
+            U.detach().cpu().numpy(),
+            seg_faces_np,
+            seg_bary_np,
+            seg_pairs_np,
+        )
+    else:
+        return (
+            labels_tensor.cpu().numpy(),
+            polylines,
+            S.detach().cpu().numpy(),
+            U.detach().cpu().numpy(),
+            seg_faces_np,
+            seg_bary_np,
+        )

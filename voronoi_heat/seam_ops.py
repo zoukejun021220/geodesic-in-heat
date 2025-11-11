@@ -26,61 +26,64 @@ def certify_segments_equal_distance(
     cg_iters: int,
     tau: float,
 ) -> Tuple[np.ndarray, np.ndarray, List[Tuple[int, int]]]:
-    """
-    Certify segments using baseline heat distances (independent of trainable sources).
-    Keep segments where the two closest distances are nearly equal at both endpoints
-    and correspond to the same seed pair. Returns filtered (faces, bary) and pair list.
+    """Vectorized certification via baseline heat distances.
+
+    Keeps segments where the two smallest distances at both endpoints are
+    nearly equal (|d_i-d_j|<=tau) and correspond to the same seed pair.
+    Returns filtered (faces, bary) and the corresponding seed pairs.
     """
     from .voronoi_heat_torch import heat_method_distances  # local import to avoid cycles
 
     if seg_faces.size == 0:
         return seg_faces, seg_bary, []
 
-    labels_np, dists_np = heat_method_distances(
+    _, dists_np = heat_method_distances(
         model,
         seeds,
         cg_tol=cg_tol,
         cg_iters=cg_iters,
     )
+
     V = model.V
     F = model.F
-    dists = torch.from_numpy(dists_np).to(V.device, dtype=V.dtype)  # (nV,C)
+    device = V.device
+    dtype = V.dtype
+
+    dists = torch.from_numpy(dists_np).to(device=device, dtype=dtype)  # (nV,C)
     C = dists.shape[1]
-
-    keep_faces: List[int] = []
-    keep_bary: List[np.ndarray] = []
-    keep_pairs: List[Tuple[int, int]] = []
-    tol = float(tau)
-
-    for idx in range(seg_faces.shape[0]):
-        f = int(seg_faces[idx])
-        bpair = seg_bary[idx]  # (2,3)
-        face = F[f]
-        w0 = torch.from_numpy(bpair[0]).to(V.device, dtype=V.dtype)
-        w1 = torch.from_numpy(bpair[1]).to(V.device, dtype=V.dtype)
-        d0 = (dists[face, :] * w0[:, None]).sum(dim=0)
-        d1 = (dists[face, :] * w1[:, None]).sum(dim=0)
-        top2_0 = torch.topk(-d0, k=min(2, C), largest=True).indices.tolist()
-        top2_1 = torch.topk(-d1, k=min(2, C), largest=True).indices.tolist()
-        if len(top2_0) < 2 or len(top2_1) < 2:
-            continue
-        pair0 = tuple(sorted((top2_0[0], top2_0[1])))
-        pair1 = tuple(sorted((top2_1[0], top2_1[1])))
-        if pair0 != pair1:
-            continue
-        i, j = pair0
-        if abs(float(d0[i].item() - d0[j].item())) <= tol and abs(float(d1[i].item() - d1[j].item())) <= tol:
-            keep_faces.append(f)
-            keep_bary.append(bpair.copy())
-            keep_pairs.append((i, j))
-
-    if not keep_faces:
+    if C < 2:
         return np.zeros((0,), dtype=np.int64), np.zeros((0, 2, 3), dtype=np.float32), []
-    return (
-        np.asarray(keep_faces, dtype=np.int64),
-        np.asarray(keep_bary, dtype=np.float32),
-        keep_pairs,
-    )
+
+    faces_t = torch.from_numpy(seg_faces.astype(np.int64, copy=False)).to(device)
+    bary_t = torch.from_numpy(seg_bary.astype(np.float32, copy=False)).to(device=device, dtype=dtype)  # (N,2,3)
+    verts = F[faces_t]                     # (N,3)
+    dist_f = dists[verts]                  # (N,3,C)
+    w0 = bary_t[:, 0, :].unsqueeze(-1)     # (N,3,1)
+    w1 = bary_t[:, 1, :].unsqueeze(-1)     # (N,3,1)
+    d0 = (dist_f * w0).sum(dim=1)          # (N,C)
+    d1 = (dist_f * w1).sum(dim=1)          # (N,C)
+
+    K = 2
+    top0 = torch.topk(-d0, k=K, dim=1).indices  # (N,2)
+    top1 = torch.topk(-d1, k=K, dim=1).indices  # (N,2)
+    pair0 = torch.sort(top0, dim=1).values      # (N,2)
+    pair1 = torch.sort(top1, dim=1).values      # (N,2)
+    same_pair = (pair0 == pair1).all(dim=1)
+
+    tol = float(tau)
+    i0, j0 = pair0[:, 0], pair0[:, 1]
+    eq0 = (d0.gather(1, i0.view(-1, 1)) - d0.gather(1, j0.view(-1, 1))).abs().squeeze(1) <= tol
+    eq1 = (d1.gather(1, i0.view(-1, 1)) - d1.gather(1, j0.view(-1, 1))).abs().squeeze(1) <= tol
+    keep_mask = same_pair & eq0 & eq1
+
+    if not keep_mask.any():
+        return np.zeros((0,), dtype=np.int64), np.zeros((0, 2, 3), dtype=np.float32), []
+
+    faces_keep = faces_t[keep_mask].detach().cpu().numpy().astype(np.int64, copy=False)
+    bary_keep = bary_t[keep_mask].detach().cpu().numpy().astype(np.float32, copy=False)
+    pairs_keep = pair0[keep_mask].detach().cpu().tolist()
+    pairs_out = [(int(a), int(b)) for a, b in pairs_keep]
+    return faces_keep, bary_keep, pairs_out
 
 
 def build_cut_mesh_from_segments(
@@ -176,4 +179,3 @@ __all__ = [
     "build_cut_mesh_from_segments",
     "lift_sources_to_cut",
 ]
-

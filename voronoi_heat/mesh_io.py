@@ -277,7 +277,10 @@ def write_viz_npz(
     if segment_bary is not None and getattr(segment_bary, "size", 0) > 0:
         arrays["hinge_segments_bary"] = np.asarray(segment_bary, dtype=np.float32)
     if sources is not None and getattr(sources, "size", 0) > 0:
-        arrays["sources"] = np.asarray(sources, dtype=np.float32)
+        src = np.asarray(sources, dtype=np.float32)
+        arrays["sources"] = src
+        # Alias commonly used name in viewer commands
+        arrays["final_sources"] = src
     np.savez(path, **arrays)
 
 
@@ -290,4 +293,3 @@ __all__ = [
     "write_voronoi_vtp",
     "write_viz_npz",
 ]
-
