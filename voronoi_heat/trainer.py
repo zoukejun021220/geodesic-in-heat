@@ -34,6 +34,7 @@ from .losses import (
     polyline_direction_loss,
     eq_margin_losses,
     gradient_only_edge_loss,
+    gradient_only_edge_loss_from_X,
     gradient_only_edge_loss_x,
     seam_resolve_loss_on_cut,
     interface_penalty_grad_U,
@@ -377,12 +378,10 @@ def train(cfg: TrainConfig) -> None:
             grad_face = face_gradients(S, model.F, model.gI, model.gJ, model.gK)
 
             if cfg.gradonly_enable:
-                # Use unit-direction based gradient-only residual (no labels, no S-gating)
-                seam_loss = gradient_only_edge_loss_x(
+                # Non-self-referential seam loss: rely solely on unit directions
+                seam_loss = gradient_only_edge_loss_from_X(
                     model,
                     X,
-                    lam_tau=cfg.gradonly_lam_tau,
-                    lam_u=cfg.gradonly_lam_u,
                     beta_edge=cfg.grad_align_beta_edge,
                 )
                 terms = {"jump": zero, "normal": zero, "tan": zero}

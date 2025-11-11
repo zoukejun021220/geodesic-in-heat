@@ -436,7 +436,6 @@ def edge_pair_mirror_scores(
     return edge_idx, edge_tris, pair_ids, scores, conf_edge
 
 
-@torch.no_grad()
 def edge_pair_mirror_scores_from_X(
     vertices: Tensor,
     faces: Tensor,

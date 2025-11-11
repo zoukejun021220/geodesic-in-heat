@@ -304,6 +304,37 @@ def gradient_only_edge_loss(
     return (w * r).sum() / w.sum().clamp_min(1.0e-9)
 
 
+def gradient_only_edge_loss_from_X(
+    model: VoronoiHeatModel,
+    X_face: Tensor,
+    *,
+    beta_edge: float = 12.0,
+) -> Tensor:
+    """Mirror-score seam loss using only unit directions (no labels/S)."""
+
+    device = model.V.device
+    dtype = model.V.dtype
+    edge_idx, edge_tris, pair_ids, scores, conf = edge_pair_mirror_scores_from_X(
+        model.V,
+        model.F,
+        X_face,
+        beta_edge=beta_edge,
+    )
+    if scores.numel() == 0 or pair_ids.numel() == 0:
+        return torch.zeros((), device=device, dtype=dtype)
+
+    best_score, _ = scores.max(dim=1)
+    weight = conf.clamp_min(1.0e-6)
+
+    va = edge_idx[:, 0]
+    vb = edge_idx[:, 1]
+    edge_len = (model.V[vb] - model.V[va]).norm(dim=1)
+    len_gate = (edge_len / (edge_len.mean().detach() + 1.0e-12)).clamp(0.5, 2.0)
+
+    w = weight * len_gate
+    return -(w * best_score).sum() / w.sum().clamp_min(1.0e-9)
+
+
 def gradient_only_edge_loss_x(
     model: VoronoiHeatModel,
     X_face: Tensor,
@@ -504,6 +535,8 @@ __all__ = [
     "polyline_direction_loss",
     "eq_margin_losses",
     "gradient_only_edge_loss",
+    "gradient_only_edge_loss_from_X",
+    "gradient_only_edge_loss_x",
     "seam_resolve_loss_on_cut",
     "interface_penalty_grad_U",
 ]
