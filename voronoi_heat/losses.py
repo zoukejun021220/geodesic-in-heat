@@ -398,19 +398,17 @@ def seam_resolve_loss_on_cut(
 
         g_i_L = grad_face[faceL, i]
         g_j_R = grad_face[faceR, j]
-        nGi = (g_i_L * n_e).sum()
-        nGj = (g_j_R * n_e).sum()
-        tGi = (g_i_L * tau).sum()
-        tGj = (g_j_R * tau).sum()
-
-        r = (nGi + nGj) ** 2 + float(lam_tau) * (tGi - tGj) ** 2
-        # Optional unit-direction symmetry terms (parity with edge loss)
+        # Base: unit-direction bounded residual
+        Xi = _safe_normalize(g_i_L.unsqueeze(0), dim=1).squeeze(0)
+        Xj = _safe_normalize(g_j_R.unsqueeze(0), dim=1).squeeze(0)
+        r = ((Xi + Xj) * n_e).sum() ** 2 + float(lam_tau) * (((Xi - Xj) * tau).sum() ** 2)
+        # Optional: add magnitude-sensitive variant if requested
         if lam_u > 0.0:
-            Xi = _safe_normalize(g_i_L.unsqueeze(0), dim=1).squeeze(0)
-            Xj = _safe_normalize(g_j_R.unsqueeze(0), dim=1).squeeze(0)
-            r = r + float(lam_u) * (
-                ((Xi + Xj) * n_e).sum() ** 2 + ((Xi - Xj) * tau).sum() ** 2
-            )
+            nGi = (g_i_L * n_e).sum()
+            nGj = (g_j_R * n_e).sum()
+            tGi = (g_i_L * tau).sum()
+            tGj = (g_j_R * tau).sum()
+            r = r + float(lam_u) * ((nGi + nGj) ** 2 + (tGi - tGj) ** 2)
         if lam_eq > 0.0:
             Si_p = S_cut[pL, i]
             Sj_p = S_cut[pL, j]

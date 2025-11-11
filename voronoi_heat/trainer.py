@@ -51,6 +51,7 @@ from .voronoi_heat_torch import (
     VoronoiHeatModel,
     TrainableSources,
     heat_only_face_loss,
+    heat_only_face_loss_vec,
     face_gradients,
     infer_labels_and_segments,
     heat_method_distances,
@@ -464,7 +465,7 @@ def train(cfg: TrainConfig) -> None:
                         seam_loss = seam_loss + seam_cut_loss
             else:
                 if any(abs(phase_cfg[key]) > 0.0 for key in ("w_jump", "w_normal", "w_tan")):
-                    seam_loss, terms = heat_only_face_loss(
+                    seam_loss, terms = heat_only_face_loss_vec(
                         grad_face=grad_face,
                         S_face=S_face,
                         V=model.V,

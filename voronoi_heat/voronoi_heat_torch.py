@@ -29,6 +29,7 @@ __all__ = [
     "train_step",
     "infer_labels_and_segments",
     "heat_only_face_loss",
+    "heat_only_face_loss_vec",
     "heat_method_distances",
 ]
 
@@ -969,6 +970,58 @@ def heat_only_face_loss(
     }
 
 
+def heat_only_face_loss_vec(
+    grad_face: Tensor,
+    S_face: Tensor,
+    V: Tensor,
+    F: Tensor,
+    n_hat: Tensor,
+    *,
+    kappa: float = 20.0,
+    beta_pairs: float = 10.0,
+    K: int = 3,
+    S_full: Optional[Tensor] = None,
+    w_jump: float = 1.0,
+    w_normal: float = 0.5,
+    w_tan: float = 0.25,
+    ignore_face_mask: Optional[Tensor] = None,
+    U_full: Optional[Tensor] = None,
+    use_soft_flip: bool = False,
+    softflip_beta: float = 12.0,
+    softflip_margin: float = 0.15,
+    softflip_eta: float = 12.0,
+    softflip_alpha: float = 1.0,
+    softflip_kappa: Optional[float] = None,
+) -> Tuple[Tensor, Dict[str, Tensor]]:
+    """Vectorized Stage-2 loss wrapper.
+
+    The existing implementation is already batched; this wrapper keeps a
+    stable API for switching from legacy paths and allows future tuning.
+    """
+    return heat_only_face_loss(
+        grad_face=grad_face,
+        S_face=S_face,
+        V=V,
+        F=F,
+        n_hat=n_hat,
+        kappa=kappa,
+        beta_pairs=beta_pairs,
+        K=K,
+        S_full=S_full,
+        w_jump=w_jump,
+        w_normal=w_normal,
+        w_tan=w_tan,
+        ignore_face_mask=ignore_face_mask,
+        U_full=U_full,
+        use_soft_flip=use_soft_flip,
+        softflip_beta=softflip_beta,
+        softflip_margin=softflip_margin,
+        softflip_eta=softflip_eta,
+        softflip_alpha=softflip_alpha,
+        softflip_kappa=softflip_kappa,
+    )
+
+
 # -----------------------------------------------------------------------------
 # Inference helpers
 # -----------------------------------------------------------------------------
@@ -1232,6 +1285,47 @@ class VoronoiHeatModel(torch.nn.Module):
             h2 = mean_edge_length(V, F) ** 2
             t = h2
         self.t = float(t)
+
+        # Vectorization caches (pair indices and edge topology)
+        self.register_buffer("pair_idx_cache", torch.empty(0, 2, dtype=torch.long, device=torch_device), persistent=False)
+        self.register_buffer("edge_index", getattr(self, "edge_index", torch.empty(0, 2, dtype=torch.long, device=torch_device)), persistent=False)
+        self.register_buffer("edge_tris", torch.empty(0, 2, dtype=torch.long, device=torch_device), persistent=False)
+        try:
+            self._build_topology_cache()
+        except Exception:
+            pass
+
+    @torch.no_grad()
+    def _build_topology_cache(self) -> None:
+        """Precompute unique edges and edge adjacency for vectorized ops."""
+        if self.F.numel() == 0:
+            return
+        F = self.F.long()
+        device = self.V.device
+        e01 = torch.stack([F[:, 0], F[:, 1]], dim=1)
+        e12 = torch.stack([F[:, 1], F[:, 2]], dim=1)
+        e20 = torch.stack([F[:, 2], F[:, 0]], dim=1)
+        E_all = torch.cat([e01, e12, e20], dim=0)
+        E_sort, _ = torch.sort(E_all, dim=1)
+        E_unique, inv = torch.unique(E_sort, dim=0, return_inverse=True)
+        self.edge_index = E_unique.to(device=device)
+        E = E_unique.shape[0]
+        face_ids = torch.arange(F.shape[0], device=device)
+        face_ids = face_ids.repeat(3)
+        edge_tris = torch.full((E, 2), -1, dtype=torch.long, device=device)
+        counts = torch.zeros((E,), dtype=torch.int64, device=device)
+        pos = counts[inv]
+        edge_tris[inv, pos] = face_ids
+        counts.index_add_(0, inv, torch.ones_like(inv, dtype=torch.int64))
+        self.edge_tris = edge_tris
+
+    @torch.no_grad()
+    def ensure_pair_indices(self, C: int) -> torch.Tensor:
+        """Return cached unordered pair indices (P,2) for given channel count."""
+        if self.pair_idx_cache.numel() == 0 or self.pair_idx_cache.shape[0] != (C * (C - 1)) // 2:
+            idx = torch.combinations(torch.arange(C, device=self.V.device), r=2)
+            self.pair_idx_cache = idx.to(dtype=torch.long)
+        return self.pair_idx_cache
 
     def forward(self, B_heat: Tensor, *, cg_tol: float = 1.0e-6, cg_iters: int = 200) -> Tuple[Tensor, Tensor, Tensor]:
         """Perform heat solve and return (U, X_face, S)."""
