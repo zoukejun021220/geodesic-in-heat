@@ -192,10 +192,10 @@ def heat_solve_multi(
     return _cg_matrix_multi(matvec, B, A_diag, tol=tol, maxiter=iters)
 
 
-def _cg_matrix_multi(matvec, B: Tensor, A_diag: Tensor, *, tol: float, maxiter: int) -> Tensor:
+def _cg_matrix_multi(matvec, B: Tensor, A_diag: Tensor, *, tol: float, maxiter: int, x0: Tensor | None = None) -> Tensor:
     """Jacobi-preconditioned CG for multi-RHS systems with per-column early stop."""
 
-    X = torch.zeros_like(B)
+    X = torch.zeros_like(B) if x0 is None else x0.clone()
     R = B - matvec(X)
     M_inv = (1.0 / A_diag.clamp_min(1.0e-12)).to(B.dtype)
     Z = M_inv[:, None] * R
@@ -899,23 +899,31 @@ def heat_only_face_loss(
     grad_i = torch.gather(grad_face, 1, pair_i[:, :, None].expand(-1, -1, 3))
     grad_j = torch.gather(grad_face, 1, pair_j[:, :, None].expand(-1, -1, 3))
 
-    tau_dot_i = (grad_i * tau_hat[:, None, :]).sum(dim=2)
-    tau_dot_j = (grad_j * tau_hat[:, None, :]).sum(dim=2)
-    nin_dot_i = (grad_i * n_in[:, None, :]).sum(dim=2)
-    nin_dot_j = (grad_j * n_in[:, None, :]).sum(dim=2)
+    # Simplified, consistent seam tangent: tau = normalize(n x dG), with dG = grad_i - grad_j
+    dG_pair = grad_i - grad_j  # (nF, P, 3)
+    tau_pair = safe_normalize(torch.cross(n_hat[:, None, :], dG_pair, dim=2), dim=2)  # (nF,P,3)
+    n_in_pair = safe_normalize(torch.cross(n_hat[:, None, :], tau_pair, dim=2), dim=2)  # (nF,P,3)
 
-    # Tangent penalty should drive both tangential components to zero (orthogonality),
-    # not merely make them equal. Use magnitude-based penalty instead of difference.
-    tan_eq = (tau_dot_i ** 2 + tau_dot_j ** 2)
-    norm_opp = (nin_dot_i + nin_dot_j) ** 2
+    tau_dot_i = (grad_i * tau_pair).sum(dim=2)
+    tau_dot_j = (grad_j * tau_pair).sum(dim=2)
+    nin_dot_i = (grad_i * n_in_pair).sum(dim=2)
+    nin_dot_j = (grad_j * n_in_pair).sum(dim=2)
+
+    # Tangent penalty: drive both tangential components to zero (orthogonality)
+    tan_eq = (tau_dot_i.pow(2) + tau_dot_j.pow(2))
+    # Normal mirror penalty
+    norm_opp = (nin_dot_i + nin_dot_j).pow(2)
 
     grad_diff = grad_i - grad_j
     jump_strength = grad_diff.norm(dim=2)
 
-    prob_face_scores = torch.softmax(-softflip_beta * S_face, dim=1)
-    tie_i = torch.gather(prob_face_scores, 1, pair_i)
-    tie_j = torch.gather(prob_face_scores, 1, pair_j)
-    tie_gate = (4.0 * tie_i * tie_j).clamp(0.0, 1.0)
+    if use_soft_flip:
+        prob_face_scores = torch.softmax(-softflip_beta * S_face, dim=1)
+        tie_i = torch.gather(prob_face_scores, 1, pair_i)
+        tie_j = torch.gather(prob_face_scores, 1, pair_j)
+        tie_gate = (4.0 * tie_i * tie_j).clamp(0.0, 1.0)
+    else:
+        tie_gate = torch.ones_like(s_face_i, dtype=dtype, device=device)
 
     s_face_i = torch.gather(S_face, 1, pair_i)
     s_face_j = torch.gather(S_face, 1, pair_j)
@@ -948,19 +956,23 @@ def heat_only_face_loss(
     else:
         w_pairs = w_pairs_sumS
 
-    weights = rho[:, None] * w_pairs * tie_gate
+    # Per-face renormalized weights; do not depend on segment geometry (rho)
+    weights = w_pairs * tie_gate
     if ignore_face_mask is not None and ignore_face_mask.numel() == nF:
         mask_float = (~ignore_face_mask).to(weights.dtype)
         weights = weights * mask_float[:, None]
     if pair_mask.numel() > 0:
         weights = weights * pair_mask.to(weights.dtype)
 
-    loss_norm = torch.sum(weights * norm_opp)
-    loss_tan = torch.sum(weights * tan_eq)
-    weight_sum = weights.sum().clamp_min(1.0e-9)
-    jump_metric = torch.sum(weights * jump_strength) / weight_sum
+    # Renormalize per face to avoid tiny weight sums
+    w_face_sum = weights.sum(dim=1, keepdim=True).clamp_min(EPS)
+    w_face = weights / w_face_sum
+
+    loss_norm = (w_face * norm_opp).sum() / float(nF)
+    loss_tan = (w_face * tan_eq).sum() / float(nF)
+    jump_metric = (w_face * jump_strength).sum(dim=1).mean()
     jump_beta = 0.1
-    loss_jump = torch.sum(weights * torch.sigmoid(-jump_beta * jump_strength)) / weight_sum
+    loss_jump = (w_face * torch.sigmoid(-jump_beta * jump_strength)).sum(dim=1).mean()
 
     total = w_jump * loss_jump + w_normal * loss_norm + w_tan * loss_tan
     return total, {
@@ -1327,7 +1339,7 @@ class VoronoiHeatModel(torch.nn.Module):
             self.pair_idx_cache = idx.to(dtype=torch.long)
         return self.pair_idx_cache
 
-    def forward(self, B_heat: Tensor, *, cg_tol: float = 1.0e-6, cg_iters: int = 200) -> Tuple[Tensor, Tensor, Tensor]:
+    def forward(self, B_heat: Tensor, *, cg_tol: float = 1.0e-6, cg_iters: int = 200, x0: Tensor | None = None) -> Tuple[Tensor, Tensor, Tensor]:
         """Perform heat solve and return (U, X_face, S)."""
 
         if (
@@ -1342,7 +1354,7 @@ class VoronoiHeatModel(torch.nn.Module):
             def matvec(X: Tensor) -> Tensor:
                 return self.M_diag[:, None] * X + self.t * _safe_sparse_mm(self.L_csr, X)
 
-            U = _cg_matrix_multi(matvec, B_heat, A_diag, tol=cg_tol, maxiter=cg_iters)
+            U = _cg_matrix_multi(matvec, B_heat, A_diag, tol=cg_tol, maxiter=cg_iters, x0=x0)
         else:
             U = heat_solve_multi(
                 self.M_diag,

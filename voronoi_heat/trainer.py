@@ -58,6 +58,7 @@ from .voronoi_heat_torch import (
     extract_segments_in_face_hard,
     _stitch_polylines,
 )
+from .fast_stage2 import heat_only_face_loss_fast
 from .snapshots import save_stage_snapshot, write_seam_transition_report
 
 
@@ -369,7 +370,9 @@ def train(cfg: TrainConfig) -> None:
 
         if phase != "warm" and not (phase == "stage3" and cfg.stage3_no_solve):
             B_heat = sources(model.M_diag, temp=src_temp)
-            U, X, S = model(B_heat, cg_tol=cfg.cg_tol, cg_iters=cfg.cg_iters)
+            # Warm-start CG from previous U when available
+            U, X, S = model(B_heat, cg_tol=cfg.cg_tol, cg_iters=cfg.cg_iters, x0=locals().get("_U_prev", None))
+            _U_prev = U.detach()
             S_face = torch.stack([S[model.F[:, 0]], S[model.F[:, 1]], S[model.F[:, 2]]], dim=1).mean(dim=1)
             grad_face = face_gradients(S, model.F, model.gI, model.gJ, model.gK)
 
@@ -464,28 +467,20 @@ def train(cfg: TrainConfig) -> None:
                         )
                         seam_loss = seam_loss + seam_cut_loss
             else:
-                if any(abs(phase_cfg[key]) > 0.0 for key in ("w_jump", "w_normal", "w_tan")):
-                    seam_loss, terms = heat_only_face_loss_vec(
-                        grad_face=grad_face,
-                        S_face=S_face,
+                if any(abs(phase_cfg[key]) > 0.0 for key in ("w_normal", "w_tan")):
+                    # Fully vectorized Stage-2 using unit-direction residuals and τ = n×∇Δ
+                    seam_loss, terms = heat_only_face_loss_fast(
                         V=model.V,
-                        F=model.F,
-                        n_hat=model.n_hat,
-                        kappa=kappa,
-                        beta_pairs=beta_pairs,
+                        F=model.F.long(),
+                        S_vert=S,
+                        n_f=model.n_hat,
+                        gI=model.gI,
+                        gJ=model.gJ,
+                        gK=model.gK,
                         K=cfg.topK_pairs,
-                        S_full=S,
-                        ignore_face_mask=seed_face_mask,
-                        w_jump=phase_cfg["w_jump"],
+                        beta_pairs=beta_pairs,
                         w_normal=phase_cfg["w_normal"],
                         w_tan=phase_cfg["w_tan"],
-                        U_full=U,
-                        use_soft_flip=cfg.use_soft_flip,
-                        softflip_beta=cfg.softflip_beta,
-                        softflip_margin=cfg.softflip_margin,
-                        softflip_eta=cfg.softflip_eta,
-                        softflip_alpha=cfg.softflip_alpha,
-                        softflip_kappa=cfg.softflip_kappa,
                     )
 
             if phase_cfg["align_weight"] > 0.0:
