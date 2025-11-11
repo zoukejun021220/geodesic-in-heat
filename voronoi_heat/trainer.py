@@ -145,6 +145,7 @@ class TrainConfig:
     gradonly_lam_eq: float = 0.0
     seam_cert_tau: float = 1.0e-3
     gradonly_interface_lambda: float = 0.0
+    gradonly_cut_stage2: bool = False
 
 
 def train(cfg: TrainConfig) -> None:
@@ -390,12 +391,12 @@ def train(cfg: TrainConfig) -> None:
                 cert_count = 0
                 # Only run cut-and-resolve during Stage-3; keep Stage-2 pure
                 if (
-                    phase == "stage3"
-                    and cfg.gradonly_cut_resolve_enable
+                    cfg.gradonly_cut_resolve_enable
                     and (cfg.gradonly_cut_every > 0)
                     and ((step % cfg.gradonly_cut_every) == 0)
                     and (seeds is not None)
                     and (len(seeds) >= 2)
+                    and (phase == "stage3" or cfg.gradonly_cut_stage2)
                 ):
                     with torch.no_grad():
                         # Prefer gradient-chosen pairs from current field; avoid label overrides

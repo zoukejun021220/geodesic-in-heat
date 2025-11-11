@@ -309,6 +309,7 @@ def gradient_only_edge_loss_from_X(
     X_face: Tensor,
     *,
     beta_edge: float = 12.0,
+    beta_pairs: float = 8.0,
 ) -> Tensor:
     """Mirror-score seam loss using only unit directions (no labels/S)."""
 
@@ -323,16 +324,19 @@ def gradient_only_edge_loss_from_X(
     if scores.numel() == 0 or pair_ids.numel() == 0:
         return torch.zeros((), device=device, dtype=dtype)
 
-    best_score, _ = scores.max(dim=1)
-    weight = conf.clamp_min(1.0e-6)
-
     va = edge_idx[:, 0]
     vb = edge_idx[:, 1]
     edge_len = (model.V[vb] - model.V[va]).norm(dim=1)
     len_gate = (edge_len / (edge_len.mean().detach() + 1.0e-12)).clamp(0.5, 2.0)
 
+    weight = conf.clamp_min(1.0e-6)
+
+    # Soft aggregation over pairs keeps gradients flowing through scores
+    w_pairs = torch.softmax(beta_pairs * scores, dim=1)
+    s_bar = (w_pairs * scores).sum(dim=1)
+
     w = weight * len_gate
-    return -(w * best_score).sum() / w.sum().clamp_min(1.0e-9)
+    return -(w * s_bar).sum() / w.sum().clamp_min(1.0e-9)
 
 
 def gradient_only_edge_loss_x(
